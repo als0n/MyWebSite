@@ -1,0 +1,136 @@
+name: Hugo build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hugo-build-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Hugo ${{ matrix.edition }} ${{ matrix.hugo-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - hugo-version: "0.158.0"
+            edition: standard
+            package-prefix: hugo
+          - hugo-version: "0.164.0"
+            edition: standard
+            package-prefix: hugo
+          - hugo-version: "0.164.0"
+            edition: extended
+            package-prefix: hugo_extended
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Hugo
+        env:
+          HUGO_VERSION: ${{ matrix.hugo-version }}
+          HUGO_PACKAGE_PREFIX: ${{ matrix.package-prefix }}
+        run: |
+          package="${HUGO_PACKAGE_PREFIX}_${HUGO_VERSION}_linux-amd64.deb"
+          url="https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/${package}"
+          wget --quiet --output-document="${RUNNER_TEMP}/${package}" "${url}"
+          sudo dpkg --install "${RUNNER_TEMP}/${package}"
+          hugo version
+
+      - name: Build drafts
+        run: |
+          hugo \
+            --source exampleSite \
+            --themesDir ../.. \
+            --buildDrafts \
+            --panicOnWarning \
+            --gc \
+            --cleanDestinationDir
+
+      - name: Build production site
+        run: |
+          hugo \
+            --source exampleSite \
+            --themesDir ../.. \
+            --minify \
+            --panicOnWarning \
+            --gc \
+            --cleanDestinationDir
+
+      - name: Check temporary downstream installation
+        if: matrix.edition == 'standard'
+        run: npm run test:installation
+
+      - name: Check demonstration boundary
+        run: bash .github/scripts/check-demo-boundary.sh
+
+      - name: Check page modes
+        run: bash .github/scripts/check-page-modes.sh exampleSite/public
+
+      - name: Check editorial framework
+        run: bash .github/scripts/check-editorial-framework.sh exampleSite/public
+
+      - name: Check Section 27 fixtures
+        run: node .github/scripts/check-section-27-fixtures.mjs exampleSite/public
+
+      - name: Check structured records
+        run: bash .github/scripts/check-structured-records.sh exampleSite/public
+
+      - name: Check release hardening
+        run: bash .github/scripts/check-release-hardening.sh exampleSite/public
+
+      - name: Check release documentation
+        run: bash .github/scripts/check-release-docs.sh
+
+  quality:
+    name: Links, HTML, accessibility, performance and visual regression
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Hugo
+        env:
+          HUGO_VERSION: "0.164.0"
+        run: |
+          package="hugo_${HUGO_VERSION}_linux-amd64.deb"
+          url="https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/${package}"
+          curl --fail --silent --show-error --location \
+            --output "${RUNNER_TEMP}/${package}" \
+            "${url}"
+          dpkg --install "${RUNNER_TEMP}/${package}"
+          hugo version
+
+      - name: Install test dependencies
+        run: npm ci
+
+      - name: Run quality suite
+        run: npm run test:quality
+
+      - name: Upload browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-test-diagnostics
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 14
